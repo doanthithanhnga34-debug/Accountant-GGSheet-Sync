@@ -1,0 +1,12 @@
+/node_modules
+.env
+.env.node_modules/
+.env.*
+.env.yaml
+src/credentials/
+src/credentials/*.json
+npm-debug.log*
+.DB_Store
+.gcloudignore
+.package.json
+.package-lock.json
