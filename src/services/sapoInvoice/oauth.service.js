@@ -27,12 +27,16 @@ async function createAuthorizeUrl() {
   }
 
   const state = createOAuthState();
-  await db.collection(STATE_COLLECTION).doc(STATE_DOC).set({
-    state: state,
-    connectedTenantId: tenantId,
+  await db
+    .collection(STATE_COLLECTION)
+    .doc(STATE_DOC)
+    .set({
+      state: state,
+      connectedTenantId: tenantId,
 
-    createdAt: new Date(),
-  });
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    });
 
   const params = new URLSearchParams();
 
@@ -82,9 +86,14 @@ async function validateState(state) {
   }
 
   const data = doc.data();
-  if (data.expiredAt && data.expiredAt.toDate() < new Date()) {
+  if (!data.state || data.state !== state) {
+    throw new Error("OAuth state mismatch");
+  }
+  if (data.expiresAt && data.expiresAt.toDate() < new Date()) {
+    await ref.delete();
     throw new Error("OAuth state expired");
   }
+  await ref.delete();
   return true;
 }
 
@@ -170,63 +179,231 @@ async function exchangeCodeForTokens(code) {
   }
 }
 
-async function refreshAccessToken(refreshToken, connectedTenantId) {
+
+// async function refreshAccessToken(
+//   refreshToken,
+//   connectedTenantId
+// ) {
+//   if (!refreshToken) {
+//     throw new Error(
+//       "Missing Sapo Invoice refresh token"
+//     );
+//   }
+
+//   if (!connectedTenantId) {
+//     throw new Error(
+//       "Missing connected tenant id"
+//     );
+//   }
+
+//   console.log("[TOKEN REFRESH REQUEST]", {
+//     hasRefreshToken:
+//       Boolean(refreshToken),
+
+//     connectedTenantId:
+//       String(connectedTenantId),
+//   });
+
+//   try {
+//     const response =
+//       await axios.post(
+//         config.sapoInvoice.refreshUrl,
+
+//         {
+//           token_exchange: {
+//             client_id:
+//               config.sapoInvoice.clientId,
+
+//             client_secret:
+//               config.sapoInvoice.clientSecret,
+
+//             refresh_token:
+//               refreshToken,
+//           },
+//         },
+
+//         {
+//           params: {
+//             connected_tenant_id:
+//               String(
+//                 connectedTenantId
+//               ),
+//           },
+
+//           headers: {
+//             "Content-Type":
+//               "application/json",
+
+//             Accept:
+//               "application/json",
+//           },
+
+//           timeout: 15000,
+//         }
+//       );
+
+//     const tokens =
+//       response.data?.token_exchange ??
+//       response.data;
+
+//     if (!tokens?.access_token) {
+//       throw new Error(
+//         "Sapo refresh response missing access_token"
+//       );
+//     }
+
+//     if (!tokens?.refresh_token) {
+//       throw new Error(
+//         "Sapo refresh response missing refresh_token"
+//       );
+//     }
+
+//     console.log(
+//       "[TOKEN REFRESH SUCCESS]",
+//       {
+//         hasAccessToken: true,
+//         hasRefreshToken: true,
+//         expiresIn:
+//           tokens.expires_in,
+//       }
+//     );
+
+//     return tokens;
+
+//   } catch (error) {
+//     console.error(
+//       "[TOKEN REFRESH ERROR]",
+//       {
+//         status:
+//           error.response?.status,
+
+//         data:
+//           error.response?.data,
+
+//         message:
+//           error.message,
+//       }
+//     );
+
+//     const err =
+//       new Error(
+//         `Sapo token refresh failed: ${
+//           JSON.stringify(
+//             error.response?.data
+//           ) ||
+//           error.message
+//         }`
+//       );
+
+//     err.status =
+//       error.response?.status ||
+//       500;
+
+//     throw err;
+//   }
+// }
+
+async function refreshAccessToken(
+  refreshToken
+) {
   if (!refreshToken) {
-    throw new Error("Missing sapo Invoice refresh token");
-  }
-  if (!connectedTenantId) {
-    throw new Error("Missing connected tenant id");
+    throw new Error(
+      "Missing Sapo Invoice refresh token"
+    );
   }
 
   try {
-    const response = await axios.post(
-      config.sapoInvoice.refreshUrl,
-      {
-        token_exchange: {
-          client_id: config.sapoInvoice.clientId,
+    const response =
+      await axios.post(
+        config.sapoInvoice.refreshUrl,
+        {
+          token_exchange: {
+            client_id:
+              config.sapoInvoice.clientId,
 
-          client_secret: config.sapoInvoice.clientSecret,
+            client_secret:
+              config.sapoInvoice.clientSecret,
 
-          refresh_token: refreshToken,
-          connected_tenant_id: connectedTenantId,
+            refresh_token:
+              refreshToken,
+          },
         },
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
+        {
+          headers: {
+            "Content-Type":
+              "application/json",
 
-          Accept: "application/json",
+            Accept:
+              "application/json",
+          },
+
+          timeout: 15000,
         },
+      );
 
-        timeout: 15000,
-      },
-    );
+    const tokens =
+      response.data?.token_exchange;
 
-    const tokens = response.data;
+    if (!tokens) {
+      throw new Error(
+        "Sapo refresh response missing token_exchange"
+      );
+    }
 
     if (!tokens.access_token) {
-      throw new Error("Sapo refresh response missing access token");
+      throw new Error(
+        "Sapo refresh response missing access_token"
+      );
     }
+
     if (!tokens.refresh_token) {
-      throw new Error("Sapo refresh response missing refresh_token");
+      throw new Error(
+        "Sapo refresh response missing refresh_token"
+      );
     }
-    return tokens;
-  } catch (error) {
-    console.error("[TOKEN REFRESH ERROR]", {
-      status: error.response?.status,
 
-      data: error.response?.data,
-
-      message: error.message,
-    });
-
-    const err = new Error(
-      `Sapo token refresh failed: ${
-        JSON.stringify(error.response?.data) || error.message
-      }`,
+    console.log(
+      "[TOKEN REFRESH SUCCESS]",
+      {
+        hasAccessToken: true,
+        hasRefreshToken: true,
+        expiresIn:
+          tokens.expires_in,
+        scope:
+          tokens.scope,
+      }
     );
 
-    err.status = error.response?.status || 500;
+    return tokens;
+
+  } catch (error) {
+    console.error(
+      "[TOKEN REFRESH ERROR]",
+      {
+        status:
+          error.response?.status,
+
+        data:
+          error.response?.data,
+
+        message:
+          error.message,
+      }
+    );
+
+    const err =
+      new Error(
+        `Sapo token refresh failed: ${
+          JSON.stringify(
+            error.response?.data
+          ) ||
+          error.message
+        }`
+      );
+
+    err.status =
+      error.response?.status ||
+      500;
 
     throw err;
   }

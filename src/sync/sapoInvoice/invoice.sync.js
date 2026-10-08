@@ -2,13 +2,6 @@ const config = require("../../config");
 const { getInvoices } = require("../../services/sapoInvoice/invoice.service");
 const invoiceSyncState = require("../../services/sapoInvoice/syncState.service");
 const sheetService = require("../../services/sheet/sheet.service");
-const {
-  ensureSheet,
-  ensureHeaders,
-  ensureSheetSize,
-  columnNumberToLetter,
-  updateValues,
-} = require("../../services/sheet/sheet.service");
 const { excludeInvoice } = require("../../utils/filter.helper");
 const invoiceMapper = require("./invoice.mapper");
 
@@ -19,11 +12,15 @@ async function buildInvoiceIdIndex() {
     invoiceMapper.HEADERS.length,
   );
 
-  const values = await sheetService.getValues(
-    `'${sheetName}'!A2:${lastColumn}`,
+  const allValues = await sheetService.getValues(
+    `'${sheetName}'!A:${lastColumn}`,
     sheetId,
   );
   const updatedAtIndex = invoiceMapper.HEADERS.indexOf("Ngày cập nhật");
+  if (updatedAtIndex === -1) {
+    throw new Error("Not found Ngày cập nhật column");
+  }
+  const values = allValues.slice(1);
   const index = new Map();
   values.forEach((row, indexRow) => {
     const id = String(row[0] || "").trim();
@@ -46,6 +43,26 @@ async function buildInvoicesBatch() {
   const startRow = Number(syncState.nextRow) || 2;
 
   try {
+    const sheetName = String(config.sheet.sapoInvoice.sheetName).trim();
+    const sheetID = config.sheet.sapoInvoice.sheetId;
+    const lastColumn = sheetService.columnNumberToLetter(
+      invoiceMapper.HEADERS.length,
+    );
+    await sheetService.ensureSheet(
+      sheetName,
+      1000,
+      invoiceMapper.HEADERS.length,
+      sheetID,
+    );
+    await sheetService.ensureHeaders(sheetName, invoiceMapper.HEADERS, sheetID);
+    const invoiceDate = invoiceMapper.HEADERS.indexOf("Ngày hóa đơn");
+    if (invoiceDate === -1) {
+      throw new Error("not column invoice date");
+    }
+    await sheetService.formatDateTimeColumn(sheetName, invoiceDate, sheetID);
+
+    const idIndex = await buildInvoiceIdIndex();
+
     const invoices = await getInvoices({ page: page, limit: limit });
     if (!invoices.length) {
       return {
@@ -56,29 +73,51 @@ async function buildInvoicesBatch() {
     const filterInvoices = invoices.filter(
       (invoice) => !excludeInvoice(invoice),
     );
+
     const rows = [];
+    const updateData = [];
+
+    let totalSkip = 0;
+    let totalUpdate = 0;
 
     for (const invoice of filterInvoices) {
+      const invoiceId = String(invoice.id || "").trim();
+      if (!invoiceId) {
+        continue;
+      }
+
       const row = await invoiceMapper.invoiceToRow(invoice);
-      rows.push(row);
+      const newUpdateAt = String(invoice.update_at || "").trim();
+      const existing = idIndex.get(invoiceId);
+
+      if (!existing) {
+        const futureRow = startRow + rows.length;
+        rows.push(row);
+        idIndex.set(invoiceId, {
+          row: futureRow,
+          updateAt: newUpdateAt,
+        });
+        continue;
+      }
+      if (existing.updateAt === newUpdateAt) {
+        totalSkip++;
+        continue;
+      }
+      updateData.push({
+        range: `'${sheetName}'!A${existing.row}:${lastColumn}${existing.row}`,
+
+        values: [row],
+      });
+      idIndex.set(invoiceId, {
+        row: existing.row,
+        updateAt: newUpdateAt,
+      });
+      totalUpdate++;
     }
 
-    const sheetName = String(config.sheet.sapoInvoice.sheetName).trim();
-    const sheetID = config.sheet.sapoInvoice.sheetId;
-
-    await sheetService.ensureSheet(
-      sheetName,
-      1000,
-      invoiceMapper.HEADERS.length,
-      sheetID,
-    );
-    await sheetService.ensureHeaders(sheetName, invoiceMapper.HEADERS, sheetID);
-
-    const invoiceDate = invoiceMapper.HEADERS.indexOf("Ngày hóa đơn");
-    if (invoiceDate === -1) {
-      throw new Error("not column invoice date");
+    if (updateData.length > 0) {
+      await sheetService.batchUpdateValues(updateData, sheetID);
     }
-    await sheetService.formatDateTimeColumn(sheetName, invoiceDate, sheetID);
 
     if (rows.length > 0) {
       const endRow = startRow + rows.length - 1;
@@ -88,7 +127,7 @@ async function buildInvoicesBatch() {
         invoiceMapper.HEADERS.length,
         sheetID,
       );
-      const lastColumn = columnNumberToLetter(invoiceMapper.HEADERS.length);
+
       await sheetService.updateValues(
         `'${sheetName}'!A${startRow}:${lastColumn}${endRow}`,
         rows,
@@ -97,6 +136,7 @@ async function buildInvoicesBatch() {
     }
 
     const done = invoices.length < limit;
+    const nextRow = startRow + rows.length;
 
     await invoiceSyncState.set({
       nextPage: page + 1,
@@ -106,15 +146,22 @@ async function buildInvoicesBatch() {
     return {
       success: true,
       done,
+
       page,
       nextPage: page + 1,
+
       totalInvoices: invoices.length,
-      filteredInvoices: invoices.length - filterInvoices.length,
-      written: rows.length,
+
+      excluded: invoices.length - filterInvoices.length,
+
+      inserted: rows.length,
+
+      updated: totalUpdate,
+
+      skipped: totalSkip,
 
       startRow,
-
-      nextRow: startRow + rows.length,
+      nextRow,
     };
   } catch (e) {
     await invoiceSyncState.set({
@@ -134,6 +181,7 @@ async function incremental() {
   const filteredInvoices = invoices.filter(
     (invoice) => !excludeInvoice(invoice),
   );
+  console.log("filtered invoices ", filteredInvoices);
   const lastColumn = sheetService.columnNumberToLetter(
     invoiceMapper.HEADERS.length,
   );
